@@ -2,7 +2,7 @@ import os
 import re
 import asyncio
 import logging
-from aiohttp import web, ClientSession
+from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
@@ -14,8 +14,8 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-user_links = {}
-user_search_results = {}
+# Foydalanuvchi havolalarini xotirada saqlash
+user_video_data = {}
 
 def clean_instagram_url(raw_url: str) -> str:
     match = re.search(r'(https?://(?:www\.)?instagram\.com/(?:reel|p|tv)/[A-Za-z0-9_-]+)', raw_url)
@@ -32,63 +32,51 @@ def download_video(url: str):
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
-        return ydl.prepare_filename(info)
+        filename = ydl.prepare_filename(info)
+        
+        # Audio va trek ma'lumotlarini video yuklangandayoq aniqlab olamiz
+        artist = info.get('artist') or info.get('creator') or info.get('uploader') or "Ibojon"
+        track = info.get('track') or info.get('alt_title')
+        title = info.get('title', '')
+        
+        if not track:
+            if " - " in title and not title.lower().startswith("video by"):
+                parts = title.split(" - ", 1)
+                artist, track = parts[0].strip(), parts[1].strip()
+            else:
+                track = "Musiqa"
+        
+        return filename, artist, track
 
-def get_track_info_and_audio(url: str):
+def extract_direct_audio(url: str, user_id: int):
     os.makedirs("downloads", exist_ok=True)
+    audio_path = f"downloads/{user_id}_music.mp3"
+    
+    # Instagram'dan audioni toza mp3 formatida to'g'ridan-to'g'ri ajratib olish
     ydl_opts = {
-        'outtmpl': 'downloads/%(id)s_audio.%(ext)s',
+        'outtmpl': audio_path,
         'format': 'bestaudio/best',
         'quiet': True,
         'no_warnings': True,
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        file_path = ydl.prepare_filename(info)
-
-        track = info.get('track') or info.get('alt_title')
-        artist = info.get('artist') or info.get('creator') or info.get('uploader')
-        title = info.get('title', '')
-        description = info.get('description', '')
-
-        search_query = None
-        if track and not str(track).lower().startswith("original"):
-            search_query = f"{artist} {track}".strip() if artist else track
-        elif artist and artist not in ["Instagram", "Ibojon", "None"]:
-            first_line = description.split('\n')[0] if description else ""
-            clean_desc = re.sub(r'#\S+', '', first_line).strip()[:30]
-            search_query = f"{artist} {clean_desc}".strip()
-        elif title and not title.lower().startswith("video by"):
-            search_query = title
-
-        return file_path, search_query, artist or "Ibojon", track or "Audio"
-
-async def search_deezer_tracks(query: str):
-    url = f"https://api.deezer.com/search?q={query}&limit=5"
-    async with ClientSession() as session:
-        async with session.get(url) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                return data.get('data', [])
-    return []
-
-async def download_direct_mp3(download_url: str, filename: str):
-    os.makedirs("downloads", exist_ok=True)
-    file_path = f"downloads/{filename}.mp3"
-    async with ClientSession() as session:
-        async with session.get(download_url) as resp:
-            if resp.status == 200:
-                with open(file_path, 'wb') as f:
-                    f.write(await resp.read())
-                return file_path
+        ydl.download([url])
+    
+    if os.path.exists(audio_path):
+        return audio_path
+    
+    # Agar fayl nomi boshqacha kengaytma bilan saqlangan bo'lsa
+    for f in os.listdir("downloads"):
+        if f.startswith(f"{user_id}_music"):
+            return os.path.join("downloads", f)
     return None
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
     await message.answer(
         "Assalomu alaykum!\n\n"
-        "Instagram havola yuboring, video va undagi qo'shiqni to'liq varianti bilan topib beraman."
+        "Menga Instagram reels yoki video havolasini yuboring. Videoni va undagi qo'shiqni to'liq holda yuklab beraman."
     )
 
 @dp.message(F.text.regexp(r'https?://(?:www\.)?instagram\.com/(?:reel|p|tv)/[A-Za-z0-9_-]+'))
@@ -98,12 +86,17 @@ async def handle_instagram_link(message: types.Message):
 
     try:
         loop = asyncio.get_running_loop()
-        video_path = await loop.run_in_executor(None, download_video, url)
+        video_path, artist, track = await loop.run_in_executor(None, download_video, url)
 
-        user_links[message.from_user.id] = url
+        # Foydalanuvchi ma'lumotlarini saqlaymiz
+        user_video_data[message.from_user.id] = {
+            'url': url,
+            'artist': artist,
+            'track': track
+        }
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Musiqani yuklab olish", callback_data="find_music")],
+            [InlineKeyboardButton(text="🎵 Musiqani yuklab olish", callback_data="get_music")],
             [InlineKeyboardButton(text="Guruhga qo'shish", url="https://t.me/Instavideodowland_bot?startgroup=true")]
         ])
 
@@ -116,107 +109,47 @@ async def handle_instagram_link(message: types.Message):
         await status_msg.delete()
 
     except Exception as e:
-        logging.error(f"Xatolik: {e}")
-        await status_msg.edit_text("Yuklab bo'lmadi. Profil yopiq yoki havola xato bo'lishi mumkin.")
+        logging.error(f"Video xatosi: {e}")
+        await status_msg.edit_text("Yuklab bo'lmadi. Havola noto'g'ri yoki profil yopiq bo'lishi mumkin.")
 
-@dp.callback_query(F.data == "find_music")
-async def find_music_callback(callback: types.CallbackQuery):
+@dp.callback_query(F.data == "get_music")
+async def send_music_callback(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    url = user_links.get(user_id)
+    data = user_video_data.get(user_id)
 
-    if not url:
+    if not data:
         await callback.answer("Havola topilmadi. Videoni qaytadan yuboring.", show_alert=True)
         return
 
-    await callback.answer("Musiqa qidirilmoqda...")
-    status_msg = await callback.message.reply("🔍 Qo'shiq qidirilmoqda...")
+    await callback.answer("Musiqa tayyorlanmoqda...")
+    status_music = await callback.message.reply("⏳ Musiqa yuklab olinmoqda...")
 
     try:
         loop = asyncio.get_running_loop()
-        audio_path, query, artist, track = await loop.run_in_executor(None, get_track_info_and_audio, url)
+        audio_file_path = await loop.run_in_executor(None, extract_direct_audio, data['url'], user_id)
 
-        songs = []
-        if query:
-            songs = await search_deezer_tracks(query)
+        if audio_file_path and os.path.exists(audio_file_path):
+            audio_file = FSInputFile(audio_file_path)
+            track_name = data['track']
+            artist_name = data['artist']
 
-        # Agar bazadan topilmasa, videoning o'zidan olingan audioni beramiz
-        if not songs:
-            if os.path.exists(audio_path):
-                audio_file = FSInputFile(audio_path)
-                await callback.message.reply_audio(
-                    audio=audio_file,
-                    caption="Ibojonga raxmat ayting! @Instavideodowland_bot",
-                    title=track[:40],
-                    performer=artist[:30]
-                )
-                os.remove(audio_path)
-            await status_msg.delete()
-            return
-
-        if os.path.exists(audio_path):
-            os.remove(audio_path)
-
-        user_search_results[user_id] = {str(i+1): s for i, s in enumerate(songs)}
-
-        main_artist = songs[0].get('artist', {}).get('name', artist)
-        main_title = songs[0].get('title', track)
-
-        text = f"Ижрочи: **{main_artist}**\nҚўшиқ номи: **{main_title}**\n\n"
-        for i, s in enumerate(songs, 1):
-            dur_sec = s.get('duration', 0)
-            dur_str = f" {dur_sec // 60}:{dur_sec % 60:02d}" if dur_sec else ""
-            text += f"{i}. {s.get('title', 'Noma\'lum')}{dur_str}\n"
-
-        buttons = [
-            InlineKeyboardButton(text=str(i), callback_data=f"sel_song_{i}")
-            for i in range(1, len(songs) + 1)
-        ]
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
-
-        await callback.message.reply(text, reply_markup=keyboard, parse_mode="Markdown")
-        await status_msg.delete()
-
-    except Exception as e:
-        logging.error(f"Xatolik: {e}")
-        await status_msg.edit_text("Musiqani topishda xatolik yuz berdi.")
-
-@dp.callback_query(F.data.startswith("sel_song_"))
-async def download_selected_song(callback: types.CallbackQuery):
-    num = callback.data.replace("sel_song_", "")
-    user_id = callback.from_user.id
-    user_songs = user_search_results.get(user_id, {})
-    song_info = user_songs.get(num)
-
-    if not song_info:
-        await callback.answer("Qidiruv muddati tugagan, qaytadan urinib ko'ring.", show_alert=True)
-        return
-
-    await callback.answer(f"{num}-musiqa yuklanmoqda...")
-    status = await callback.message.reply(f"⏳ **{song_info.get('title')}** yuklab olinmoqda...", parse_mode="Markdown")
-
-    try:
-        mp3_url = song_info.get('preview')
-        title = song_info.get('title', 'Audio')
-        artist = song_info.get('artist', {}).get('name', 'Ibojon')
-
-        file_path = await download_direct_mp3(mp3_url, f"{user_id}_{num}")
-
-        if file_path and os.path.exists(file_path):
-            audio_file = FSInputFile(file_path)
+            caption = f"🎧 **{artist_name} - {track_name}**\n\nIbojonga raxmat ayting! @Instavideodowland_bot"
+            
             await callback.message.reply_audio(
                 audio=audio_file,
-                caption="Ibojonga raxmat ayting! @Instavideodowland_bot",
-                title=title,
-                performer=artist
+                caption=caption,
+                title=track_name[:40],
+                performer=artist_name[:30],
+                parse_mode="Markdown"
             )
-            os.remove(file_path)
+            os.remove(audio_file_path)
+            await status_music.delete()
         else:
-            await callback.message.reply("Faylni yuklab bo'lmadi.")
+            await status_music.edit_text("Musiqani yuklab bo'lmadi.")
 
-        await status.delete()
     except Exception as e:
-        logging.error(f"Yuklash xatosi: {e}")
-        await status.edit_text("Ushbu musiqa variantini yuklab bo'lmadi.")
+        logging.error(f"Audio xatosi: {e}")
+        await status_music.edit_text("Musiqani ajratishda xatolik yuz berdi.")
 
 async def health_check(request):
     return web.Response(text="Bot is running!")
