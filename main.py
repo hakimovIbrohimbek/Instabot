@@ -2,14 +2,15 @@ import os
 import re
 import asyncio
 import logging
-import static_ffmpeg
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 import yt_dlp
+import imageio_ffmpeg
 
-static_ffmpeg.add_paths()
+# imageio orqali ffmpeg yo'lini aniqlash (Render tizimidan mustaqil ishlaydi)
+FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 
 TOKEN = "7622123900:AAFdOgczhmAZ8S5ZFDcqhalvBH2uD6FpKfg"
 
@@ -49,13 +50,15 @@ def download_video(url: str):
         
         return filename, str(artist), str(track)
 
-def extract_direct_audio(url: str, user_id: int):
+def extract_mp3_audio(url: str, user_id: int):
     os.makedirs("downloads", exist_ok=True)
     out_base = f"downloads/{user_id}_audio"
     
+    # imageio-ffmpeg orqali to'g'ridan-to'g'ri MP3 ga konvertatsiya qilish
     ydl_opts = {
         'outtmpl': f'{out_base}.%(ext)s',
         'format': 'best',
+        'ffmpeg_location': FFMPEG_PATH,
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
@@ -65,23 +68,24 @@ def extract_direct_audio(url: str, user_id: int):
         'no_warnings': True,
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     }
+    
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
     
-    target_path = f"{out_base}.mp3"
-    if os.path.exists(target_path):
-        return target_path
+    target_mp3 = f"{out_base}.mp3"
+    if os.path.exists(target_mp3):
+        return target_mp3
         
-    for f in os.listdir("downloads"):
-        if f.startswith(f"{user_id}_audio"):
-            return os.path.join("downloads", f)
+    for file in os.listdir("downloads"):
+        if file.startswith(f"{user_id}_audio"):
+            return os.path.join("downloads", file)
     return None
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
     await message.answer(
         "Assalomu alaykum!\n\n"
-        "Menga Instagram reels yoki video havolasini yuboring. Videoni va undagi qo'shiqni yuklab beraman."
+        "Menga Instagram reels yoki video havolasini yuboring. Videoni va undagi qo'shiqni tiniq MP3 holatida yuklab beraman."
     )
 
 @dp.message(F.text.regexp(r'https?://(?:www\.)?instagram\.com/(?:reel|p|tv)/[A-Za-z0-9_-]+'))
@@ -130,21 +134,23 @@ async def send_music_callback(callback: types.CallbackQuery):
 
     try:
         loop = asyncio.get_running_loop()
-        audio_file_path = await loop.run_in_executor(None, extract_direct_audio, data['url'], user_id)
+        audio_file_path = await loop.run_in_executor(None, extract_mp3_audio, data['url'], user_id)
 
         if audio_file_path and os.path.exists(audio_file_path):
             audio_file = FSInputFile(audio_file_path)
             track_name = data['track']
             artist_name = data['artist']
 
-            # Markdown o'rniga oddiy matn (xatolik bermasligi uchun)
-            caption = f"🎧 {artist_name} - {track_name}\n\nIbojonga raxmat ayting! @Instavideodowland_bot"
+            # Telegram Bad Request parsing xatosini oldini olish uchun toza matn
+            clean_track = re.sub(r'[_*`\[\]]', '', track_name)
+            clean_artist = re.sub(r'[_*`\[\]]', '', artist_name)
+            caption = f"🎧 {clean_artist} - {clean_track}\n\nIbojonga raxmat ayting! @Instavideodowland_bot"
             
             await callback.message.reply_audio(
                 audio=audio_file,
                 caption=caption,
-                title=track_name[:40],
-                performer=artist_name[:30]
+                title=clean_track[:40],
+                performer=clean_artist[:30]
             )
             os.remove(audio_file_path)
             await status_music.delete()
