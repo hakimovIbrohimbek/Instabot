@@ -81,10 +81,13 @@ def extract_mp3_audio(url: str, user_id: int):
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
-    await message.answer(
-        "Assalomu alaykum!\n\n"
-        "Menga Instagram reels yoki video havolasini yuboring. Videoni va uning fonidagi audioni toza MP3 formatda ajratib beraman."
+    start_text = (
+        "👋 Assalomu alaykum! Ibojonni yuklovchi botiga xush kelibsiz!\n\n"
+        "📥 Instagram video havolasini yuboring va uni osongina yuklab oling!\n\n"
+        "⚡ Tezkor va qulay!\n"
+        "✅ Majburiy obunasiz!"
     )
+    await message.answer(start_text)
 
 @dp.message(F.text.regexp(r'https?://(?:www\.)?instagram\.com/(?:reel|p|tv)/[A-Za-z0-9_-]+'))
 async def handle_instagram_link(message: types.Message):
