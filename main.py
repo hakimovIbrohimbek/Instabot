@@ -2,19 +2,17 @@ import os
 import re
 import asyncio
 import logging
-from aiohttp import web
+from aiohttp import web, ClientSession
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 import yt_dlp
-from ytmusicapi import YTMusic
 
 TOKEN = "7622123900:AAFdOgczhmAZ8S5ZFDcqhalvBH2uD6FpKfg"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-ytmusic = YTMusic()
 
 user_links = {}
 user_search_results = {}
@@ -66,29 +64,25 @@ def get_track_info_and_audio(url: str):
 
         return file_path, search_query, artist or "Ibojon", track or "Audio"
 
-def download_youtube_audio(video_id: str):
+async def search_deezer_tracks(query: str):
+    url = f"https://api.deezer.com/search?q={query}&limit=5"
+    async with ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return data.get('data', [])
+    return []
+
+async def download_direct_mp3(download_url: str, filename: str):
     os.makedirs("downloads", exist_ok=True)
-    outtmpl = f"downloads/{video_id}.%(ext)s"
-    
-    # YouTube bot blokirovkasini aylanib o'tish uchun Android mijoz sozlamasi
-    ydl_opts = {
-        'outtmpl': outtmpl,
-        'format': 'ba/b',
-        'quiet': True,
-        'no_warnings': True,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'ios'],
-                'player_skip': ['webpage', 'configs']
-            }
-        },
-        'user_agent': 'com.google.android.youtube/19.09.37 (Linux; U; Android 11; US) gzip',
-    }
-    
-    track_url = f"https://www.youtube.com/watch?v={video_id}"
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(track_url, download=True)
-        return ydl.prepare_filename(info)
+    file_path = f"downloads/{filename}.mp3"
+    async with ClientSession() as session:
+        async with session.get(download_url) as resp:
+            if resp.status == 200:
+                with open(file_path, 'wb') as f:
+                    f.write(await resp.read())
+                return file_path
+    return None
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
@@ -143,16 +137,9 @@ async def find_music_callback(callback: types.CallbackQuery):
 
         songs = []
         if query:
-            try:
-                search_res = await loop.run_in_executor(None, ytmusic.search, query, "songs")
-                songs = [s for s in search_res if s.get('videoId')][:5]
-                
-                if not songs:
-                    search_res = await loop.run_in_executor(None, ytmusic.search, query)
-                    songs = [s for s in search_res if s.get('videoId')][:5]
-            except Exception as se:
-                logging.error(f"Qidiruv xatosi: {se}")
+            songs = await search_deezer_tracks(query)
 
+        # Agar bazadan topilmasa, videoning o'zidan olingan audioni beramiz
         if not songs:
             if os.path.exists(audio_path):
                 audio_file = FSInputFile(audio_path)
@@ -171,13 +158,13 @@ async def find_music_callback(callback: types.CallbackQuery):
 
         user_search_results[user_id] = {str(i+1): s for i, s in enumerate(songs)}
 
-        main_title = songs[0].get('title', query)
-        main_artist = songs[0].get('artists', [{}])[0].get('name', artist)
+        main_artist = songs[0].get('artist', {}).get('name', artist)
+        main_title = songs[0].get('title', track)
 
         text = f"Ижрочи: **{main_artist}**\nҚўшиқ номи: **{main_title}**\n\n"
         for i, s in enumerate(songs, 1):
-            dur = s.get('duration', '')
-            dur_str = f" {dur}" if dur else ""
+            dur_sec = s.get('duration', 0)
+            dur_str = f" {dur_sec // 60}:{dur_sec % 60:02d}" if dur_sec else ""
             text += f"{i}. {s.get('title', 'Noma\'lum')}{dur_str}\n"
 
         buttons = [
@@ -208,18 +195,23 @@ async def download_selected_song(callback: types.CallbackQuery):
     status = await callback.message.reply(f"⏳ **{song_info.get('title')}** yuklab olinmoqda...", parse_mode="Markdown")
 
     try:
-        loop = asyncio.get_running_loop()
-        file_path = await loop.run_in_executor(None, download_youtube_audio, song_info['videoId'])
+        mp3_url = song_info.get('preview')
+        title = song_info.get('title', 'Audio')
+        artist = song_info.get('artist', {}).get('name', 'Ibojon')
 
-        if os.path.exists(file_path):
+        file_path = await download_direct_mp3(mp3_url, f"{user_id}_{num}")
+
+        if file_path and os.path.exists(file_path):
             audio_file = FSInputFile(file_path)
             await callback.message.reply_audio(
                 audio=audio_file,
                 caption="Ibojonga raxmat ayting! @Instavideodowland_bot",
-                title=song_info.get('title', 'Audio'),
-                performer=song_info.get('artists', [{}])[0].get('name', 'Ibojon')
+                title=title,
+                performer=artist
             )
             os.remove(file_path)
+        else:
+            await callback.message.reply("Faylni yuklab bo'lmadi.")
 
         await status.delete()
     except Exception as e:
