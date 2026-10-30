@@ -1,5 +1,3 @@
 aiogram
 yt-dlp
 aiohttp
-shazamio
-ytmusicapi
