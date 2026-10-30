@@ -2,11 +2,14 @@ import os
 import re
 import asyncio
 import logging
+import static_ffmpeg
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 import yt_dlp
+
+static_ffmpeg.add_paths()
 
 TOKEN = "7622123900:AAFdOgczhmAZ8S5ZFDcqhalvBH2uD6FpKfg"
 
@@ -14,7 +17,6 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Foydalanuvchi havolalarini xotirada saqlash
 user_video_data = {}
 
 def clean_instagram_url(raw_url: str) -> str:
@@ -34,7 +36,6 @@ def download_video(url: str):
         info = ydl.extract_info(url, download=True)
         filename = ydl.prepare_filename(info)
         
-        # Audio va trek ma'lumotlarini video yuklangandayoq aniqlab olamiz
         artist = info.get('artist') or info.get('creator') or info.get('uploader') or "Ibojon"
         track = info.get('track') or info.get('alt_title')
         title = info.get('title', '')
@@ -46,16 +47,20 @@ def download_video(url: str):
             else:
                 track = "Musiqa"
         
-        return filename, artist, track
+        return filename, str(artist), str(track)
 
 def extract_direct_audio(url: str, user_id: int):
     os.makedirs("downloads", exist_ok=True)
-    audio_path = f"downloads/{user_id}_music.mp3"
+    out_base = f"downloads/{user_id}_audio"
     
-    # Instagram'dan audioni toza mp3 formatida to'g'ridan-to'g'ri ajratib olish
     ydl_opts = {
-        'outtmpl': audio_path,
-        'format': 'bestaudio/best',
+        'outtmpl': f'{out_base}.%(ext)s',
+        'format': 'best',
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
         'quiet': True,
         'no_warnings': True,
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -63,12 +68,12 @@ def extract_direct_audio(url: str, user_id: int):
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
     
-    if os.path.exists(audio_path):
-        return audio_path
-    
-    # Agar fayl nomi boshqacha kengaytma bilan saqlangan bo'lsa
+    target_path = f"{out_base}.mp3"
+    if os.path.exists(target_path):
+        return target_path
+        
     for f in os.listdir("downloads"):
-        if f.startswith(f"{user_id}_music"):
+        if f.startswith(f"{user_id}_audio"):
             return os.path.join("downloads", f)
     return None
 
@@ -76,7 +81,7 @@ def extract_direct_audio(url: str, user_id: int):
 async def start_handler(message: types.Message):
     await message.answer(
         "Assalomu alaykum!\n\n"
-        "Menga Instagram reels yoki video havolasini yuboring. Videoni va undagi qo'shiqni to'liq holda yuklab beraman."
+        "Menga Instagram reels yoki video havolasini yuboring. Videoni va undagi qo'shiqni yuklab beraman."
     )
 
 @dp.message(F.text.regexp(r'https?://(?:www\.)?instagram\.com/(?:reel|p|tv)/[A-Za-z0-9_-]+'))
@@ -88,7 +93,6 @@ async def handle_instagram_link(message: types.Message):
         loop = asyncio.get_running_loop()
         video_path, artist, track = await loop.run_in_executor(None, download_video, url)
 
-        # Foydalanuvchi ma'lumotlarini saqlaymiz
         user_video_data[message.from_user.id] = {
             'url': url,
             'artist': artist,
@@ -133,14 +137,14 @@ async def send_music_callback(callback: types.CallbackQuery):
             track_name = data['track']
             artist_name = data['artist']
 
-            caption = f"🎧 **{artist_name} - {track_name}**\n\nIbojonga raxmat ayting! @Instavideodowland_bot"
+            # Markdown o'rniga oddiy matn (xatolik bermasligi uchun)
+            caption = f"🎧 {artist_name} - {track_name}\n\nIbojonga raxmat ayting! @Instavideodowland_bot"
             
             await callback.message.reply_audio(
                 audio=audio_file,
                 caption=caption,
                 title=track_name[:40],
-                performer=artist_name[:30],
-                parse_mode="Markdown"
+                performer=artist_name[:30]
             )
             os.remove(audio_file_path)
             await status_music.delete()
