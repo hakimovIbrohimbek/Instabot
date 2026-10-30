@@ -54,13 +54,10 @@ def get_track_info_and_audio(url: str):
         title = info.get('title', '')
         description = info.get('description', '')
 
-        # Qidiruv so'zini aniqlash mexanizmi
         search_query = None
-
         if track and not str(track).lower().startswith("original"):
             search_query = f"{artist} {track}".strip() if artist else track
         elif artist and artist not in ["Instagram", "Ibojon", "None"]:
-            # Agar faqat ijrochi nomi chiqsa, uning top musiqasini yoki tavsifdagi so'zni qo'shamiz
             first_line = description.split('\n')[0] if description else ""
             clean_desc = re.sub(r'#\S+', '', first_line).strip()[:30]
             search_query = f"{artist} {clean_desc}".strip()
@@ -71,12 +68,23 @@ def get_track_info_and_audio(url: str):
 
 def download_youtube_audio(video_id: str):
     os.makedirs("downloads", exist_ok=True)
+    outtmpl = f"downloads/{video_id}.%(ext)s"
+    
+    # YouTube bot blokirovkasini aylanib o'tish uchun Android mijoz sozlamasi
     ydl_opts = {
-        'outtmpl': f'downloads/{video_id}.%(ext)s',
-        'format': 'bestaudio/best',
+        'outtmpl': outtmpl,
+        'format': 'ba/b',
         'quiet': True,
         'no_warnings': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios'],
+                'player_skip': ['webpage', 'configs']
+            }
+        },
+        'user_agent': 'com.google.android.youtube/19.09.37 (Linux; U; Android 11; US) gzip',
     }
+    
     track_url = f"https://www.youtube.com/watch?v={video_id}"
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(track_url, download=True)
@@ -136,18 +144,15 @@ async def find_music_callback(callback: types.CallbackQuery):
         songs = []
         if query:
             try:
-                # 1. Qo'shiqlar bo'limidan qidiruv
                 search_res = await loop.run_in_executor(None, ytmusic.search, query, "songs")
                 songs = [s for s in search_res if s.get('videoId')][:5]
                 
-                # 2. Agar chiqmasa, umumiy YouTube Music qidiruvi
                 if not songs:
                     search_res = await loop.run_in_executor(None, ytmusic.search, query)
                     songs = [s for s in search_res if s.get('videoId')][:5]
             except Exception as se:
                 logging.error(f"Qidiruv xatosi: {se}")
 
-        # Agar YouTube'dan ham topilmasa, videodagi audioni beradi
         if not songs:
             if os.path.exists(audio_path):
                 audio_file = FSInputFile(audio_path)
