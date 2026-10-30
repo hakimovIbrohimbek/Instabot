@@ -7,12 +7,14 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 import yt_dlp
+from shazamio import Shazam
 
 TOKEN = "7622123900:AAFdOgczhmAZ8S5ZFDcqhalvBH2uD6FpKfg"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
+shazam = Shazam()
 
 user_links = {}
 
@@ -44,13 +46,13 @@ def download_audio(url: str):
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
-        return ydl.prepare_filename(info), info.get('title', 'Audio')
+        return ydl.prepare_filename(info)
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
     text = (
         "Assalomu alaykum!\n\n"
-        "Menga Instagram post yoki reel havolasini yuboring, videoni yuklab beraman."
+        "Menga Instagram post yoki reel havolasini yuboring, videoni va undagi musiqani topib beraman."
     )
     await message.answer(text)
 
@@ -66,7 +68,7 @@ async def handle_instagram_link(message: types.Message):
         user_links[message.from_user.id] = url
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Musiqani yuklab olish", callback_data="get_audio")],
+            [InlineKeyboardButton(text="Musiqani aniqlash va yuklash", callback_data="get_audio")],
             [InlineKeyboardButton(text="Guruhga qo'shish", url="https://t.me/Instavideodowland_bot?startgroup=true")]
         ])
 
@@ -91,20 +93,35 @@ async def send_audio_callback(callback: types.CallbackQuery):
         await callback.answer("Havola topilmadi. Videoni qaytadan yuboring.", show_alert=True)
         return
 
-    await callback.answer("Musiqa yuklanmoqda...")
-    status_audio = await callback.message.reply("Musiqa ajratib olinmoqda, kuting...")
+    await callback.answer("Musiqa aniqlanmoqda...")
+    status_audio = await callback.message.reply("🔍 Shazam orqali musiqa qidirilmoqda...")
 
     try:
         loop = asyncio.get_running_loop()
-        audio_path, title = await loop.run_in_executor(None, download_audio, url)
+        audio_path = await loop.run_in_executor(None, download_audio, url)
+
+        title = "Audio"
+        artist = "Ibojon"
+        caption_extra = ""
+
+        try:
+            out = await shazam.recognize(audio_path)
+            track = out.get('track', {})
+            if track:
+                title = track.get('title', title)
+                artist = track.get('subtitle', artist)
+                caption_extra = f"\n🎵 Qo'shiq: {artist} - {title}"
+        except Exception as shazam_err:
+            logging.error(f"Shazam xatolik: {shazam_err}")
 
         if os.path.exists(audio_path):
             audio_file = FSInputFile(audio_path)
+            caption = f"Ibojonga raxmat ayting! @Instavideodowland_bot{caption_extra}"
             await callback.message.reply_audio(
                 audio=audio_file,
-                caption="Ibojonga raxmat ayting! @Instavideodowland_bot",
-                title=title[:40],
-                performer="Ibojon"
+                caption=caption,
+                title=title,
+                performer=artist
             )
             os.remove(audio_path)
 
