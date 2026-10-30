@@ -52,14 +52,22 @@ def get_track_info_and_audio(url: str):
         track = info.get('track') or info.get('alt_title')
         artist = info.get('artist') or info.get('creator') or info.get('uploader')
         title = info.get('title', '')
+        description = info.get('description', '')
 
-        clean_query = None
+        # Qidiruv so'zini aniqlash mexanizmi
+        search_query = None
+
         if track and not str(track).lower().startswith("original"):
-            clean_query = f"{artist} {track}".strip() if artist else track
-        elif " - " in title and not title.lower().startswith("video by"):
-            clean_query = title
+            search_query = f"{artist} {track}".strip() if artist else track
+        elif artist and artist not in ["Instagram", "Ibojon", "None"]:
+            # Agar faqat ijrochi nomi chiqsa, uning top musiqasini yoki tavsifdagi so'zni qo'shamiz
+            first_line = description.split('\n')[0] if description else ""
+            clean_desc = re.sub(r'#\S+', '', first_line).strip()[:30]
+            search_query = f"{artist} {clean_desc}".strip()
+        elif title and not title.lower().startswith("video by"):
+            search_query = title
 
-        return file_path, clean_query, artist or "Ibojon", track or "Audio"
+        return file_path, search_query, artist or "Ibojon", track or "Audio"
 
 def download_youtube_audio(video_id: str):
     os.makedirs("downloads", exist_ok=True)
@@ -78,7 +86,7 @@ def download_youtube_audio(video_id: str):
 async def start_handler(message: types.Message):
     await message.answer(
         "Assalomu alaykum!\n\n"
-        "Instagram havola yuboring, Ibojonni shaxsan o'zi sizga videoni yuboradi."
+        "Instagram havola yuboring, video va undagi qo'shiqni to'liq varianti bilan topib beraman."
     )
 
 @dp.message(F.text.regexp(r'https?://(?:www\.)?instagram\.com/(?:reel|p|tv)/[A-Za-z0-9_-]+'))
@@ -127,9 +135,19 @@ async def find_music_callback(callback: types.CallbackQuery):
 
         songs = []
         if query:
-            search_res = await loop.run_in_executor(None, ytmusic.search, query, "songs")
-            songs = [s for s in search_res if s.get('videoId')][:5]
+            try:
+                # 1. Qo'shiqlar bo'limidan qidiruv
+                search_res = await loop.run_in_executor(None, ytmusic.search, query, "songs")
+                songs = [s for s in search_res if s.get('videoId')][:5]
+                
+                # 2. Agar chiqmasa, umumiy YouTube Music qidiruvi
+                if not songs:
+                    search_res = await loop.run_in_executor(None, ytmusic.search, query)
+                    songs = [s for s in search_res if s.get('videoId')][:5]
+            except Exception as se:
+                logging.error(f"Qidiruv xatosi: {se}")
 
+        # Agar YouTube'dan ham topilmasa, videodagi audioni beradi
         if not songs:
             if os.path.exists(audio_path):
                 audio_file = FSInputFile(audio_path)
