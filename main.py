@@ -7,7 +7,6 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 import yt_dlp
-from shazamio import Shazam
 from ytmusicapi import YTMusic
 
 TOKEN = "7622123900:AAFdOgczhmAZ8S5ZFDcqhalvBH2uD6FpKfg"
@@ -15,7 +14,6 @@ TOKEN = "7622123900:AAFdOgczhmAZ8S5ZFDcqhalvBH2uD6FpKfg"
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-shazam = Shazam()
 ytmusic = YTMusic()
 
 user_links = {}
@@ -38,7 +36,7 @@ def download_video(url: str):
         info = ydl.extract_info(url, download=True)
         return ydl.prepare_filename(info)
 
-def download_audio_and_meta(url: str):
+def get_track_info_and_audio(url: str):
     os.makedirs("downloads", exist_ok=True)
     ydl_opts = {
         'outtmpl': 'downloads/%(id)s_audio.%(ext)s',
@@ -50,15 +48,20 @@ def download_audio_and_meta(url: str):
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         file_path = ydl.prepare_filename(info)
-        
-        # Instagram ichidagi metadata ma'lumotlarini qidirish
-        track_name = info.get('track') or info.get('alt_title')
-        artist_name = info.get('artist') or info.get('creator') or info.get('uploader')
-        description = info.get('description', '')
 
-        return file_path, artist_name, track_name, description
+        track = info.get('track') or info.get('alt_title')
+        artist = info.get('artist') or info.get('creator') or info.get('uploader')
+        title = info.get('title', '')
 
-def download_youtube_track(video_id: str):
+        clean_query = None
+        if track and not str(track).lower().startswith("original"):
+            clean_query = f"{artist} {track}".strip() if artist else track
+        elif " - " in title and not title.lower().startswith("video by"):
+            clean_query = title
+
+        return file_path, clean_query, artist or "Ibojon", track or "Audio"
+
+def download_youtube_audio(video_id: str):
     os.makedirs("downloads", exist_ok=True)
     ydl_opts = {
         'outtmpl': f'downloads/{video_id}.%(ext)s',
@@ -75,7 +78,7 @@ def download_youtube_track(video_id: str):
 async def start_handler(message: types.Message):
     await message.answer(
         "Assalomu alaykum!\n\n"
-        "Menga Instagram reels yoki video havolasini yuboring. Videoni va undagi qo'shiqni to'liq varianti bilan topib beraman."
+        "Instagram havola yuboring, Ibojonni shaxsan o'zi sizga videoni yuboradi."
     )
 
 @dp.message(F.text.regexp(r'https?://(?:www\.)?instagram\.com/(?:reel|p|tv)/[A-Za-z0-9_-]+'))
@@ -115,41 +118,26 @@ async def find_music_callback(callback: types.CallbackQuery):
         await callback.answer("Havola topilmadi. Videoni qaytadan yuboring.", show_alert=True)
         return
 
-    await callback.answer("Musiqa aniqlanmoqda...")
-    status_msg = await callback.message.reply("🔍 Musiqa barcha manbalardan qidirilmoqda...")
+    await callback.answer("Musiqa qidirilmoqda...")
+    status_msg = await callback.message.reply("🔍 Qo'shiq qidirilmoqda...")
 
     try:
         loop = asyncio.get_running_loop()
-        audio_path, insta_artist, insta_track, description = await loop.run_in_executor(None, download_audio_and_meta, url)
+        audio_path, query, artist, track = await loop.run_in_executor(None, get_track_info_and_audio, url)
 
-        found_title = None
-        found_artist = None
+        songs = []
+        if query:
+            search_res = await loop.run_in_executor(None, ytmusic.search, query, "songs")
+            songs = [s for s in search_res if s.get('videoId')][:5]
 
-        # 1-usul: Instagram rasmiy ma'lumotlarini tekshirish
-        if insta_track and not str(insta_track).lower().startswith("original"):
-            found_title = insta_track
-            found_artist = insta_artist if insta_artist else ""
-
-        # 2-usul: Agar Instagram nomini bermagan bo'lsa, Shazam orqali tekshirish
-        if not found_title:
-            try:
-                out = await shazam.recognize(audio_path)
-                track = out.get('track', {})
-                if track:
-                    found_title = track.get('title')
-                    found_artist = track.get('subtitle')
-            except Exception as sh_err:
-                logging.error(f"Shazam xatosi: {sh_err}")
-
-        # 3-usul: Agar umuman topilmasa, toza audio faylni o'zini yuboramiz
-        if not found_title:
+        if not songs:
             if os.path.exists(audio_path):
                 audio_file = FSInputFile(audio_path)
                 await callback.message.reply_audio(
                     audio=audio_file,
                     caption="Ibojonga raxmat ayting! @Instavideodowland_bot",
-                    title="Audio",
-                    performer="Ibojon"
+                    title=track[:40],
+                    performer=artist[:30]
                 )
                 os.remove(audio_path)
             await status_msg.delete()
@@ -158,19 +146,12 @@ async def find_music_callback(callback: types.CallbackQuery):
         if os.path.exists(audio_path):
             os.remove(audio_path)
 
-        # 4-usul: YouTube Music orqali 5 xil variantini qidirib topish
-        search_query = f"{found_artist} {found_title}".strip()
-        search_res = await loop.run_in_executor(None, ytmusic.search, search_query, "songs")
-        songs = [s for s in search_res if s.get('videoId')][:5]
-
-        if not songs:
-            search_res = await loop.run_in_executor(None, ytmusic.search, search_query)
-            songs = [s for s in search_res if s.get('videoId')][:5]
-
         user_search_results[user_id] = {str(i+1): s for i, s in enumerate(songs)}
 
-        # Xabarni chiroyli formatda shakllantirish
-        text = f"🎧 **{found_artist} - {found_title}**\n\n🔍 **{found_artist} - {found_title}**\n\n"
+        main_title = songs[0].get('title', query)
+        main_artist = songs[0].get('artists', [{}])[0].get('name', artist)
+
+        text = f"Ижрочи: **{main_artist}**\nҚўшиқ номи: **{main_title}**\n\n"
         for i, s in enumerate(songs, 1):
             dur = s.get('duration', '')
             dur_str = f" {dur}" if dur else ""
@@ -186,8 +167,8 @@ async def find_music_callback(callback: types.CallbackQuery):
         await status_msg.delete()
 
     except Exception as e:
-        logging.error(f"Umumiy xatolik: {e}")
-        await status_msg.edit_text("Musiqani yuklashda xatolik yuz berdi.")
+        logging.error(f"Xatolik: {e}")
+        await status_msg.edit_text("Musiqani topishda xatolik yuz berdi.")
 
 @dp.callback_query(F.data.startswith("sel_song_"))
 async def download_selected_song(callback: types.CallbackQuery):
@@ -205,7 +186,7 @@ async def download_selected_song(callback: types.CallbackQuery):
 
     try:
         loop = asyncio.get_running_loop()
-        file_path = await loop.run_in_executor(None, download_youtube_track, song_info['videoId'])
+        file_path = await loop.run_in_executor(None, download_youtube_audio, song_info['videoId'])
 
         if os.path.exists(file_path):
             audio_file = FSInputFile(file_path)
